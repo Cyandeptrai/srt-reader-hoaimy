@@ -4,7 +4,7 @@ SRT Reader HoaiMy - Doc file phu de SRT bang giong Microsoft Edge TTS.
 Giong: HoaiMy (nu, vi-VN-HoaiMyNeural) mac dinh, NamMinh (nam, vi-VN-NamMinhNeural).
 Khong can API key: dung dich vu Edge TTS mien phi (speech.platform.bing.com).
 Dau ra: tung cau rieng (MP3) va/hoac 1 file gop dat dung moc thoi gian SRT (dub track).
-Phien ban: 1.1 (them tu cap nhat giong Chipchipdownload v6.2)
+Phien ban: 1.2 (may chu giong phu + nut Huy; sua loi "No audio was received")
 """
 import asyncio
 import json
@@ -22,7 +22,7 @@ import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "SRT Reader HoaiMy"
-VERSION = "1.1"
+VERSION = "1.2"
 # Ten file exe that su (khac APP_TITLE: exe dung gach noi, khong dung khoang trang).
 EXE_TEN = "SRT-Reader-HoaiMy.exe"
 GITHUB_REPO = "Cyandeptrai/srt-reader-hoaimy"
@@ -41,7 +41,6 @@ GIONG = {
 }
 GIONG_MAC_DINH = "HoaiMy (nữ)"
 MAU_DOC_THU = "Xin chào, đây là giọng đọc thử của HoaiMy."
-SO_LAN_THU_TOI_DA = 3
 DO_DAI_TOI_DA_MOT_LAN = 500  # ky tu; cau dai hon se tach nho
 
 
@@ -427,42 +426,157 @@ def _tao_connector(bo_xac_minh):
     return aiohttp.TCPConnector(ssl=ctx)
 
 
-async def _doc_mot_doan(text, voice, toc_do, cao_do, duong_dan_ra, bo_xac_minh):
+# ---------------- may chu giong du phong (v1.2) ----------------
+# Nguyen nhan loi "No audio was received" tren may that (11/2026,
+# edge-tts issue #490): Microsoft siet endpoint goc
+# speech.platform.bing.com - nhieu may bi tu choi 403 hoac bi ngat
+# khong tra audio du token Sec-MS-GEC v2 da dung (edge-tts 7.3.1).
+# Cach sua da duoc FluentVoice Pro 1.6.3 chung minh (10/2026): doi
+# sang may chu moi cua Microsoft api.msedgeservices.com (cung giong,
+# cung token TRUSTED_CLIENT_TOKEN), giu nguyen suot phien.
+EDGE_ALT_WSS_URL = ("wss://api.msedgeservices.com/tts/cognitiveservices/"
+                    "websocket/v1?Ocp-Apim-Subscription-Key={token}")
+_dung_may_chu_phu = False  # da chuyen sang may chu phu trong phien nay
+_khoa_may_chu = threading.Lock()
+
+
+def _lay_proxy_he_thong():
+    """Proxy he thong neu co (bien moi truong https_proxy/HTTPS_PROXY).
+    May nha thuong khong co proxy -> tra None (khong doi hanh vi)."""
+    return (os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY"))
+
+
+def _ten_may_chu(url):
+    try:
+        return url.split("/")[2]
+    except Exception:
+        return url
+
+
+def _chuyen_sang_may_chu_phu(log_cb=None):
+    """Doi edge-tts sang may chu phu api.msedgeservices.com cho den het
+    phien (giong FluentVoice Pro 1.6.3). Tra ve True neu vua chuyen,
+    False neu da o may chu phu roi."""
+    global _dung_may_chu_phu
+    import edge_tts.communicate as comm
+    from edge_tts.constants import TRUSTED_CLIENT_TOKEN
+    with _khoa_may_chu:
+        if _dung_may_chu_phu:
+            return False
+        comm.WSS_URL = EDGE_ALT_WSS_URL.format(token=TRUSTED_CLIENT_TOKEN)
+        _dung_may_chu_phu = True
+    if log_cb:
+        log_cb("  -> May chu giong goc tu choi ket noi, chuyen sang may chu "
+               "phu api.msedgeservices.com...")
+    return True
+
+
+def _mo_ta_loi_giong(e):
+    """Phan loai loi doc giong de log ro rang.
+    Tra ve (ma, giai_thich). Ma: '403' | '429' | 'khong-co-audio' |
+    'ssl' | 'mang' | 'khac'."""
+    ten = type(e).__name__
+    s = str(e)
+    status = getattr(e, "status", None)
+    if status == 403 or " 403" in s or s.startswith("403"):
+        return ("403", "Microsoft tu choi ket noi (HTTP 403) - may chu "
+                       "giong goc siet ket noi tu tool ngoai trinh duyet")
+    if status == 429 or " 429" in s or s.startswith("429"):
+        return ("429", "bi gioi han toc do (HTTP 429) - Microsoft chan tam, "
+                       "doi vai giay roi thu lai")
+    if ten == "NoAudioReceived" or "No audio was received" in s:
+        return ("khong-co-audio", "may chu chap nhan ket noi nhung ngat "
+                                   "khong tra audio (Microsoft tu choi ngam)")
+    if la_loi_chung_chi_ssl(e):
+        return ("ssl", "loi chung chi SSL - proxy/phan mem diet virus chan "
+                       "chung chi")
+    if "timeout" in s.lower() or "timed out" in s.lower():
+        return ("mang", "het thoi gian cho - mang cham hoac may chu tre")
+    return ("khac", "%s: %s" % (ten, s))
+
+
+async def _doc_mot_doan(text, voice, toc_do, cao_do, duong_dan_ra,
+                        bo_xac_minh, proxy=None):
     import edge_tts
+    import edge_tts.communicate as _comm
+    # edge-tts truyen thang ssl=_SSL_CTX (certifi) vao ws_connect, ghi de
+    # context cua connector -> muon bo xac minh that thi phai doi ca
+    # _SSL_CTX cua edge-tts (neu khong, fallback bo xac minh o v1.1 chi
+    # la hinh thuc, WSS van xac minh nhu thuong).
+    try:
+        if bo_xac_minh:
+            _comm._SSL_CTX = ssl._create_unverified_context()
+        else:
+            import certifi
+            _comm._SSL_CTX = ssl.create_default_context(
+                cafile=certifi.where())
+    except Exception:
+        pass
     comm = edge_tts.Communicate(
         text, voice,
         rate=_dinh_dang_toc_do(toc_do),
         pitch=_dinh_dang_cao_do(cao_do),
         connector=_tao_connector(bo_xac_minh),
+        proxy=proxy,
     )
     await comm.save(duong_dan_ra)
 
 
+def _doc_mot_doan_co_failover(text, voice, toc_do, cao_do, duong_dan_ra,
+                              log_cb=None):
+    """Doc 1 doan ngan thanh file MP3, co failover may chu giong.
+    Thu tu: may chu goc (SSL xac minh -> bo xac minh) roi may chu phu
+    api.msedgeservices.com (SSL xac minh -> bo xac minh). Gap 429 thi
+    doi 3 giay truoc khi thu lai. Tra ve (thanh_cong, da_dung_bo_xac_minh,
+    thong_bao_loi)."""
+    import time
+    proxy = _lay_proxy_he_thong()
+    if proxy and log_cb:
+        log_cb("  (phat hien proxy he thong, dung proxy de goi giong)")
+    if _dung_may_chu_phu:
+        cac_luot = [("phu", False), ("phu", True)]
+    else:
+        cac_luot = [("goc", False), ("goc", True),
+                    ("phu", False), ("phu", True)]
+    loi_cuoi = ""
+    for i, (may_chu, bo_xac_minh) in enumerate(cac_luot, 1):
+        if may_chu == "phu":
+            _chuyen_sang_may_chu_phu(log_cb)
+            if i == 3:
+                time.sleep(2)  # tranh 429 khi vua doi may chu
+        ten_may = ("may chu goc" if may_chu == "goc"
+                   else "may chu phu")
+        try:
+            asyncio.run(_doc_mot_doan(text, voice, toc_do, cao_do,
+                                      duong_dan_ra, bo_xac_minh, proxy))
+            if os.path.isfile(duong_dan_ra) and os.path.getsize(duong_dan_ra) > 0:
+                if log_cb and may_chu == "phu":
+                    log_cb("  OK qua may chu phu api.msedgeservices.com")
+                return True, bo_xac_minh, ""
+            raise RuntimeError("file am thanh rong (0 byte)")
+        except Exception as e:
+            ma, giai_thich = _mo_ta_loi_giong(e)
+            loi_cuoi = "%s [%s]" % (giai_thich, ma)
+            if log_cb:
+                log_cb("  Thu lan %d/%d (%s, %s) loi [%s]: %s"
+                       % (i, len(cac_luot), ten_may,
+                          "bo xac minh SSL" if bo_xac_minh else "SSL xac minh",
+                          ma, giai_thich))
+            if ma == "429":
+                time.sleep(3)
+            continue
+    return False, False, loi_cuoi
+
+
 def doc_thanh_mp3(text, voice, toc_do, cao_do, duong_dan_ra, log_cb=None):
-    """Doc 1 cau thanh file MP3. Thu toi da 3 lan, fallback bo xac minh SSL
-    khi gap loi chung chi (giong cach sua loi SSL cua Chipchipdownload v6.3).
-    Tra ve (thanh_cong, da_dung_bo_xac_minh, thong_bao_loi)."""
+    """Doc 1 cau thanh file MP3 (co failover may chu giong, xem
+    _doc_mot_doan_co_failover). Tra ve (thanh_cong, da_dung_bo_xac_minh,
+    thong_bao_loi)."""
     doan_list = tach_cau_dai(text)
     if len(doan_list) == 1:
-        for lan in range(1, SO_LAN_THU_TOI_DA + 1):
-            bo_xac_minh = (lan >= 2)
-            try:
-                asyncio.run(_doc_mot_doan(text, voice, toc_do, cao_do,
-                                          duong_dan_ra, bo_xac_minh))
-                if os.path.isfile(duong_dan_ra) and os.path.getsize(duong_dan_ra) > 0:
-                    return True, bo_xac_minh, ""
-                raise RuntimeError("file am thanh rong (0 byte)")
-            except Exception as e:
-                if log_cb:
-                    log_cb("  Thu lan %d/%d loi: %s" % (lan, SO_LAN_THU_TOI_DA, e))
-                if lan < SO_LAN_THU_TOI_DA and la_loi_chung_chi_ssl(e):
-                    if log_cb:
-                        log_cb("  -> Thu lai bo qua xac minh chung chi SSL...")
-                    continue
-                if lan < SO_LAN_THU_TOI_DA:
-                    continue
-                return False, bo_xac_minh, str(e)
-        return False, False, "khong ro loi"
+        return _doc_mot_doan_co_failover(text, voice, toc_do, cao_do,
+                                         duong_dan_ra, log_cb)
     # Cau dai: doc tung doan roi noi lai bang pydub
     import tempfile
     from pydub import AudioSegment
@@ -528,6 +642,9 @@ class App(tk.Tk):
         self.cfg = doc_config()
         self.hang_doi = queue.Queue()
         self.dang_chay = False
+        self._yeu_cau_huy = threading.Event()  # co huy: worker kiem tra
+        # giua cac cau, dung sau khi cau dang doc xong (khong ngat giua
+        # cau, khong treo giao dien).
         self._dung_ui()
         self.after(200, self._xu_ly_hang_doi)
 
@@ -626,6 +743,10 @@ class App(tk.Tk):
             f4, text="XUẤT MP3 LỒNG TIẾNG", command=self._bat_dau,
             font=("TkDefaultFont", 11, "bold"), padx=10, pady=4)
         self.btn_bat_dau.pack(side="left", padx=4)
+        # Nut Huy: chi bat khi dang chay, bam la dung sau cau hien tai.
+        self.btn_huy = tk.Button(f4, text="Hủy", command=self._bam_huy,
+                                 state="disabled", padx=10, pady=4)
+        self.btn_huy.pack(side="left", padx=4)
         tk.Button(f4, text="Kiểm tra kết nối giọng",
                   command=self._kiem_tra_giong).pack(side="left", padx=4)
         tk.Button(f4, text="Kiểm tra cập nhật",
@@ -753,6 +874,7 @@ class App(tk.Tk):
                 elif muc[0] == "xong":
                     self.dang_chay = False
                     self.btn_bat_dau.configure(state="normal")
+                    self.btn_huy.configure(state="disabled")
         except queue.Empty:
             pass
         self.after(200, self._xu_ly_hang_doi)
@@ -788,7 +910,15 @@ class App(tk.Tk):
 
     def _chay_kiem_tra(self, ts):
         voice = ts["voice"]
+        try:
+            import edge_tts
+            ver = getattr(edge_tts, "__version__", "?")
+            import edge_tts.communicate as _comm
+            may_chu = _ten_may_chu(_comm.WSS_URL)
+        except Exception:
+            ver, may_chu = "?", "?"
         self._log("Kiểm tra giọng %s (%s)..." % (ts["giong_hien_thi"], voice))
+        self._log("edge-tts %s; máy chủ giọng: %s" % (ver, may_chu))
         thu_muc = ts["thu_muc"]
         try:
             os.makedirs(thu_muc, exist_ok=True)
@@ -805,8 +935,10 @@ class App(tk.Tk):
                 dich, " (đã dùng chế độ bỏ xác minh SSL)" if bo_xac_minh else ""))
         else:
             self._log("LỖI: không tạo được giọng. %s" % loi)
-            self._log("Kiểm tra mạng rồi bấm lại. Giọng lấy từ "
-                      "speech.platform.bing.com, cần mạng mở tới Microsoft.")
+            self._log("Tool đã thử cả máy chủ gốc speech.platform.bing.com "
+                      "và máy chủ phụ api.msedgeservices.com. Kiểm tra mạng "
+                      "rồi bấm lại; nếu vẫn lỗi, xem mã lỗi [403/429/"
+                      "khong-co-audio] trong log ở trên.")
         self.hang_doi.put(("xong",))
 
     # ----- tu cap nhat (v1.1, theo mau Chipchipdownload v6.2) -----
@@ -888,6 +1020,15 @@ class App(tk.Tk):
         messagebox.showerror("Lỗi tải bản mới", msg)
 
     # ----- chay chinh -----
+    def _bam_huy(self):
+        """Nut Huy: dat co, worker se dung sau khi cau dang doc xong
+        (khong ngat giua cau). Mo nut ngay de khong bam 2 lan."""
+        if not self.dang_chay:
+            return
+        self._yeu_cau_huy.set()
+        self.btn_huy.configure(state="disabled")
+        self._log("Đã bấm Hủy — sẽ dừng sau khi câu đang đọc xong...")
+
     def _bat_dau(self):
         if self.dang_chay:
             return
@@ -921,6 +1062,8 @@ class App(tk.Tk):
         }
         self.dang_chay = True
         self.btn_bat_dau.configure(state="disabled")
+        self._yeu_cau_huy.clear()
+        self.btn_huy.configure(state="normal")
         self.hang_doi.put(("ket_qua", ""))
         threading.Thread(target=self._chay, args=(srt, ffmpeg, ts),
                          daemon=True).start()
@@ -964,10 +1107,15 @@ class App(tk.Tk):
             self._dat_trang_thai_cau(cau["chi_so"], "Chờ")
         loi_cau = {}  # chi_so -> ly do loi
         can_gop = che_do in ("gop", "ca_hai")
+        so_cau_xong = 0  # dem that, dung ca khi huy giua chung
+        cau_da_xong = set()  # chi_so cac cau da doc xong
+        da_huy = False
+        cau_dung = 0  # chi so cau dang doc luc bam Huy
 
         def doc_1_cau(cau, i):
             """Doc 1 cau, cap nhat tien trinh + trang thai trong danh sach.
             Tra ve True neu xong."""
+            nonlocal so_cau_xong
             dich = os.path.join(thu_muc_rieng, "%03d.mp3" % cau["chi_so"])
             self._tien_trinh(int((i - 1) * 100 / tong),
                              "Đang đọc câu %d/%d..." % (i, tong))
@@ -981,21 +1129,31 @@ class App(tk.Tk):
                 self._dat_trang_thai_cau(cau["chi_so"], "Lỗi: " + (loi or "?")[:60])
                 self._log("  -> LỖI câu %d: %s" % (cau["chi_so"], loi))
                 return False
+            so_cau_xong += 1
+            cau_da_xong.add(cau["chi_so"])
             self._dat_trang_thai_cau(cau["chi_so"], "Xong")
             if bo_xac_minh:
                 self._log("  -> Xong (đã dùng chế độ bỏ xác minh SSL)")
             return True
 
-        # Luot 1: doc het cac cau.
+        # Luot 1: doc het cac cau (dung ngay khi bam Huy).
         for i, cau in enumerate(cac_cau, 1):
+            if self._yeu_cau_huy.is_set():
+                da_huy = True
+                cau_dung = i
+                break
             if not doc_1_cau(cau, i):
                 loi_cau[cau["chi_so"]] = True
         # Luot 2: cau nao loi thi THU LAI 1 lan nua (loi mang thoang qua),
-        # ghi ro ket qua tung cau, khong lang le bo qua.
-        if loi_cau:
+        # ghi ro ket qua tung cau, khong lang le bo qua. Bo qua neu da huy.
+        if loi_cau and not da_huy:
             self._log("Thử lại %d câu lỗi: %s" % (len(loi_cau),
                                                   sorted(loi_cau)))
             for i, cau in enumerate(cac_cau, 1):
+                if self._yeu_cau_huy.is_set():
+                    da_huy = True
+                    cau_dung = i
+                    break
                 if cau["chi_so"] not in loi_cau:
                     continue
                 self._log("Đọc lại câu %d..." % cau["chi_so"])
@@ -1004,19 +1162,31 @@ class App(tk.Tk):
                     self._log("  -> Câu %d đọc lại THÀNH CÔNG." % cau["chi_so"])
                 else:
                     self._log("  -> Câu %d vẫn lỗi sau khi thử lại." % cau["chi_so"])
-        so_xong = tong - len(loi_cau)
-        self._tien_trinh(100, "Đã đọc xong %d/%d câu." % (so_xong, tong))
+        so_xong = so_cau_xong
+        if da_huy:
+            self._tien_trinh(int(so_xong * 100 / tong),
+                             "Đã hủy ở câu %d/%d." % (cau_dung, tong))
+            self._log("Đã hủy ở câu %d/%d. Đã xong %d câu, giữ nguyên file "
+                      "các câu đã xong trong %s."
+                      % (cau_dung, tong, so_xong, thu_muc_rieng))
+        else:
+            self._tien_trinh(100, "Đã đọc xong %d/%d câu." % (so_xong, tong))
         if loi_cau:
             self._log("Cảnh báo: %d câu vẫn lỗi sau 2 lượt: %s"
                       % (len(loi_cau), sorted(loi_cau)))
         dich_gop = None
         tong_ms_gop = 0
-        if can_gop:
+        if can_gop and (not da_huy or cau_da_xong):
             dich_gop = os.path.join(thu_muc, ten_goc + "_long-tieng.mp3")
+            # Khi huy: chi gop cac cau da xong (khong log canh bao cho
+            # hang chuc cau chua doc).
+            danh_sach_gop = (cac_cau if not da_huy else
+                             [c for c in cac_cau
+                              if c["chi_so"] in cau_da_xong])
             self._log("Đang gộp thành 1 file lồng tiếng: %s" % dich_gop)
             try:
                 ok, tong_ms_gop, canh_bao = gop_long_tieng(
-                    cac_cau, thu_muc_rieng, dich_gop, log_cb=self._log)
+                    danh_sach_gop, thu_muc_rieng, dich_gop, log_cb=self._log)
                 if ok:
                     self.file_gop = dich_gop
                     self._log("XONG file gộp: %s (dài %.1fs, %d câu bị tràn slot)"
@@ -1027,17 +1197,34 @@ class App(tk.Tk):
                 self._log("LỖI gộp file: %s" % e)
         # Bao ro ket qua: duong dan + do dai file MP3 long tieng.
         if dich_gop and os.path.isfile(dich_gop):
-            ket_qua = ("HOÀN TẤT: %d/%d câu. File MP3 lồng tiếng:\n%s\n"
-                       "Độ dài: %.1f giây."
-                       % (so_xong, tong, dich_gop, tong_ms_gop / 1000.0))
+            if da_huy:
+                ket_qua = ("ĐÃ HỦY ở câu %d/%d. Đã xong %d/%d câu. File MP3 "
+                           "lồng tiếng (dang dở, chỉ có các câu đã xong):"
+                           "\n%s\nĐộ dài: %.1f giây."
+                           % (cau_dung, tong, so_xong, tong,
+                              dich_gop, tong_ms_gop / 1000.0))
+            else:
+                ket_qua = ("HOÀN TẤT: %d/%d câu. File MP3 lồng tiếng:\n%s\n"
+                           "Độ dài: %.1f giây."
+                           % (so_xong, tong, dich_gop, tong_ms_gop / 1000.0))
             if loi_cau:
                 ket_qua += " (còn %d câu lỗi: %s)" % (len(loi_cau),
                                                       sorted(loi_cau))
             self.hang_doi.put(("ket_qua", ket_qua))
             self._log(ket_qua)
         elif che_do == "rieng":
-            ket_qua = ("HOÀN TẤT: %d/%d câu. File từng câu nằm trong:\n%s"
-                       % (so_xong, tong, thu_muc_rieng))
+            if da_huy:
+                ket_qua = ("ĐÃ HỦY ở câu %d/%d. Đã xong %d/%d câu. File "
+                           "từng câu đã xong nằm trong:\n%s"
+                           % (cau_dung, tong, so_xong, tong, thu_muc_rieng))
+            else:
+                ket_qua = ("HOÀN TẤT: %d/%d câu. File từng câu nằm trong:\n%s"
+                           % (so_xong, tong, thu_muc_rieng))
+            self.hang_doi.put(("ket_qua", ket_qua))
+            self._log(ket_qua)
+        elif da_huy:
+            ket_qua = ("ĐÃ HỦY ở câu %d/%d. Chưa xong câu nào."
+                       % (cau_dung, tong))
             self.hang_doi.put(("ket_qua", ket_qua))
             self._log(ket_qua)
         self._log("Thư mục kết quả: %s (bấm 'Mở thư mục kết quả' để xem)"

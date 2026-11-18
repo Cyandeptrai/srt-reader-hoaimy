@@ -17,7 +17,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pyinstaller edge-tts pydub
+        run: pip install pyinstaller "edge-tts>=7.3.1" pydub
 
       - name: Build EXE
         run: pyinstaller --onefile --windowed --name "SRT-Reader-HoaiMy" SRT-Reader-HoaiMy.py
@@ -49,4 +49,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "${{ github.ref_name }}"
-          gh release create $tag "release/SRT-Reader-HoaiMy.exe" --title "SRT Reader HoaiMy $tag" --notes "SRT Reader HoaiMy $tag. Doc file SRT bang giong Microsoft Edge TTS mien phi (HoaiMy/NamMinh), khong can API key. Chay truc tiep file SRT-Reader-HoaiMy.exe, khong can cai dat. v1.1: them nut Kiem tra cap nhat (tu va exe tu GitHub Releases, khong can token); luong SRT chac hon: chon file hien ngay danh sach cau + thoi gian, nut XUAT MP3 LONG TIENG chinh, cau loi thu lai 1 luot roi moi ghi loi, xuat xong bao ro duong dan + do dai file + nut mo thu muc ket qua."
+          gh release create $tag "release/SRT-Reader-HoaiMy.exe" --title "SRT Reader HoaiMy $tag" --notes "SRT Reader HoaiMy $tag. Doc file SRT bang giong Microsoft Edge TTS mien phi (HoaiMy/NamMinh), khong can API key. Chay truc tiep file SRT-Reader-HoaiMy.exe, khong can cai dat. v1.2: sua loi giong HoaiMy khong goi duoc (No audio was received) - them may chu giong phu api.msedgeservices.com, tu chuyen khi may chu goc tu choi (403/ngat khong tra audio/429); log chi tiet ma loi + may chu da thu; them nut Huy dung xuat MP3 giua chung, giu cac cau da xong."
