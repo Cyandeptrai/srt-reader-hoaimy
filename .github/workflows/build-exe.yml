@@ -1,0 +1,52 @@
+name: Build EXE
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyinstaller edge-tts pydub
+
+      - name: Build EXE
+        run: pyinstaller --onefile --windowed --name "SRT-Reader-HoaiMy" SRT-Reader-HoaiMy.py
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: SRT-Reader-HoaiMy-exe
+          path: dist/SRT-Reader-HoaiMy.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download EXE artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SRT-Reader-HoaiMy-exe
+          path: release
+
+      - name: Create GitHub Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag "release/SRT-Reader-HoaiMy.exe" --title "SRT Reader HoaiMy $tag" --notes "SRT Reader HoaiMy $tag. Doc file SRT bang giong Microsoft Edge TTS mien phi (HoaiMy/NamMinh), khong can API key. Chay truc tiep file SRT-Reader-HoaiMy.exe, khong can cai dat."
