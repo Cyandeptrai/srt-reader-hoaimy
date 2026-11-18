@@ -21,6 +21,18 @@ File nguồn: `SRT-Reader-HoaiMy.py`. Chạy trực tiếp file
    giống trang web test — ví dụ chỉnh lên **1.35x**) và **Cao độ**
    (-20Hz đến +20Hz) nếu cần. Tốc độ lưu trong `config.json` dạng hệ số
    nhân; config cũ (lưu dạng phần trăm, ví dụ +9%) tự đổi sang 1.09x.
+   - **Tự động chỉnh tốc độ từng câu** (mặc định **BẬT**): trong file SRT
+     có câu dài cần đọc nhanh mới kịp slot, có câu ngắn đọc đúng nhịp là
+     đủ — giống cách iContent làm tốc độ riêng từng câu (câu 2 = 1.60x,
+     câu 4 = 1.00x...). Khi bật, tool **đo thời lượng thật** của từng câu
+     sau khi đọc ở tốc độ cơ bản, rồi dùng **ffmpeg atempo** tăng tốc
+     file đó cho vừa slot (không gọi lại API giọng) — tốc độ thực của
+     từng câu hiện trong cột Trạng thái (ví dụ `Xong (1.60x)`).
+     **Tốc độ tối đa** mặc định **1.35x** (chỉnh được 1.00x–2.00x): câu
+     nào cần nhanh hơn mức này thì vẫn chỉ đọc ở tốc độ tối đa, tool ghi
+     cảnh báo vào nhật ký "Câu X đọc hết Ys nhưng slot chỉ có Zs (tràn
+     sang câu sau)". Tắt checkbox thì mọi câu đọc đúng tốc độ cơ bản đã
+     chọn (hành vi cũ).
 4. Chọn đầu ra (mặc định là **Gộp 1 file lồng tiếng**):
    - **Gộp 1 file lồng tiếng (MP3)**: 1 file duy nhất, mỗi câu nằm đúng mốc
      thời gian trong SRT (khoảng trống giữa các câu là im lặng) — dùng làm
@@ -93,7 +105,13 @@ file gộp ra nghe thử được ngay cả khi chưa chạy xong.
   cũng cần ffmpeg (chuyển WAV sang MP3).
 - Câu nào đọc hết dài hơn slot thời gian của nó trong SRT sẽ bị tràn —
   tool ghi cảnh báo vào nhật ký, phần tràn sẽ bị cắt khi câu sau bắt đầu.
-  Muốn hết tràn thì tăng tốc độ đọc hoặc nới thời gian trong file SRT.
+  Muốn hết tràn thì tăng **Tốc độ tối đa** (mặc định 1.35x, tối đa 2.00x)
+  hoặc nới thời gian trong file SRT. Khi **Tự động chỉnh tốc độ từng
+  câu** đang bật, tool tự tăng tốc từng câu dài cho vừa slot (dùng ffmpeg
+  atempo, không gọi lại API giọng) — chỉ câu nào nhanh hơn cả tốc độ tối
+  đa vẫn không kịp mới bị tràn và ghi cảnh báo "tràn sang câu sau".
+  Tốc độ thực của từng câu hiện trong cột Trạng thái (ví dụ `Xong
+  (1.60x)`).
 - Câu lỗi (không tạo được audio): tool **không tạo file MP3 lỗi** cho câu
   đó; khi gộp thì **bỏ qua câu lỗi** (để khoảng lặng đúng độ dài slot của
   nó), các câu khác vẫn gộp bình thường, và ghi rõ vào nhật ký

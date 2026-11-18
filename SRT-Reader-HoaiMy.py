@@ -6,10 +6,10 @@ va Giong may (cu) - giong tieng Viet co san tren may Windows (SAPI, vd Microsoft
 Khong can API key: dung dich vu Edge TTS mien phi (speech.platform.bing.com).
 Dau ra: tung cau rieng (MP3) va/hoac 1 file gop dat dung moc thoi gian SRT (dub track).
 Toc do: he so nhan 0.5x-2.0x (mac dinh 1.00x), giong trang web test.
-Phien ban: 1.3 (chan nut khi dang xuat + Huy van luu + nut Tiep tuc noi
-file cu + nut Sub lai tu dau tao file moi + gop dan tung cau + an log tho
-ffmpeg + cau loi khong lam hong file gop + nut Nghe thu PLAY ra loa +
-giong may + sua loi tu cap nhat: kiem chung file .new + sao luu exe cu)
+Phien ban: 1.4 (toc do tu dong theo tung cau: cau dai doc nhanh hon
+toi da toc-do-toi-da mac dinh 1.35x, dung ffmpeg atempo tang toc file da
+tao, khong goi lai API TTS; cau nao cung khong kip du o toc do toi da
+thi log canh bao tran slot; trang thai hien toc do thuc tung cau)
 """
 import asyncio
 import json
@@ -29,7 +29,7 @@ import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "SRT Reader HoaiMy"
-VERSION = "1.3"
+VERSION = "1.4"
 # Ten file exe that su (khac APP_TITLE: exe dung gach noi, khong dung khoang trang).
 EXE_TEN = "SRT-Reader-HoaiMy.exe"
 GITHUB_REPO = "Cyandeptrai/srt-reader-hoaimy"
@@ -80,6 +80,12 @@ def doc_config():
         "toc_do": 1.0,
         "cao_do": 0,
         "thu_muc_luu": mac_dinh_thu_muc_luu(),
+        # v1.4 - toc do tu dong theo tung cau (giong iContent): cau dai
+        # doc nhanh hon, toi da toc_do_toi_da (mac dinh 1.35x, 1.00x-
+        # 2.00x). Tat tu_dong_toc_do thi moi cau doc dung toc do co ban
+        # (hanh vi cu v1.3).
+        "toc_do_toi_da": 1.35,
+        "tu_dong_toc_do": True,
         # Mac dinh: gop 1 file MP3 long tieng (track long tieng dung timestamp
         # SRT). Muon tung cau rieng thi chon o muc Dau ra.
         "che_do": "gop",
@@ -1050,6 +1056,199 @@ def doc_cau_thanh_mp3(text, voice, toc_do, cao_do, duong_dan_ra,
     return doc_thanh_mp3(text, voice, toc_do, cao_do, duong_dan_ra, log_cb)
 
 
+# ---------------- toc do tu dong theo tung cau (v1.4, theo iContent) ----------------
+# Trong file SRT co cau dai can doc nhanh moi kip slot, co cau ngan doc
+# dung nhip la du. iContent lam toc do RIENG tung cau (cau 2 = 1.60x, cau
+# 4 = 1.00x...) va co muc "Doc nhanh hon toi da 1.35x" - cau nao can
+# nhanh hon muc do thi AI rut gon (o day tool chi tang toc toi da den
+# muc do toi da roi ghi canh bao tran slot, khong tu rut gon van ban).
+# Cach lam: tao audio o toc do co ban, DO thoi luong that cua file, neu
+# can nhanh hon thi dung ffmpeg atempo tang toc file da tao (khong goi
+# lai API TTS). Vi vay toc do thuc cua cau chi biet sau khi da doc xong
+# cau do - khong uoc luong truoc bang van ban (chi dung uoc luong khi
+# khong do duoc file that).
+TOC_DO_DOC_TRUNG_BINH_KY_TU_GIAY = 13.5  # toc do doc trung binh tieng
+# Viet o 1.00x (ky tu/giay), chi dung de UOC LUONG khi khong do duoc
+# thoi luong file that (vd: thieu ffmpeg).
+DUNG_SAI_TRAN_SLOT_MS = 100  # dung sai khi so thoi luong audio voi
+# slot SRT (ms). File MP3 sau khi ma hoa lai (atempo) thuong dai them
+# ~50ms do padding cua bo ma hoa - tran duoi 100ms la khong dang ke
+# (nghe khong ra, cau sau bat dau dung moc van de len), khong dem la
+# tran slot de khoi bao canh bao nhieu vo ich.
+
+
+def _uoc_luong_thoi_luong_ms(text, toc_do=1.0):
+    """Uoc luong thoi luong doc (ms) tu do dai van ban, khi khong do
+    duoc file audio that. Chi la uoc luong - duong chinh van la do
+    thoi luong that cua file sau khi tao."""
+    ky_tu = len((text or "").strip())
+    if ky_tu == 0:
+        return 0
+    return int(ky_tu / TOC_DO_DOC_TRUNG_BINH_KY_TU_GIAY * 1000
+               / max(0.5, float(toc_do)))
+
+
+def _do_dai_mp3_ms(duong_dan, ffmpeg):
+    """Do thoi luong file MP3 (ms). Uu tien ffprobe (nhanh, chinh xac);
+    neu khong co thi dung pydub. Tra ve None neu khong do duoc
+    (vd: thieu ffmpeg, file loi)."""
+    if not os.path.isfile(duong_dan):
+        return None
+    try:
+        if os.path.getsize(duong_dan) == 0:
+            return None
+    except OSError:
+        return None
+    ffprobe = tim_ffprobe(ffmpeg) if ffmpeg else None
+    if ffprobe:
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries",
+                 "format=duration", "-of",
+                 "default=noprint_wrappers=1:nokey=1", duong_dan],
+                capture_output=True, text=True, timeout=30)
+            if r.returncode == 0 and r.stdout.strip():
+                return int(float(r.stdout.strip()) * 1000)
+        except Exception:
+            pass
+    try:
+        from pydub import AudioSegment
+        return len(AudioSegment.from_file(duong_dan, format="mp3"))
+    except Exception:
+        return None
+
+
+def _tinh_toc_do_can(slot_ms, do_dai_ms, toc_do_co_ban, toc_do_toi_da):
+    """Tinh toc do thuc te can dung cho 1 cau (he so nhan so voi 1.00x).
+    - slot_ms: do dai slot SRT cua cau (ket_thuc - bat_dau).
+    - do_dai_ms: thoi luong audio da tao o toc_do_co_ban (None neu
+      khong do duoc).
+    Tra ve (toc_do_thuc_te, he_so_atempo, vuot_toc_do_toi_da):
+    - Doc vua slot thi toc_do_thuc = toc_do_co_ban, he_so = 1.0.
+    - Can nhanh hon: he_so = do_dai/slot; toc_do_thuc =
+      toc_do_co_ban * he_so, nhung KHONG vuot toc_do_toi_da (toc do toi
+      da hieu dung it nhat bang toc do co ban - khong the cham lai duoi
+      toc do da doc).
+    - vuot_toc_do_toi_da=True khi can nhanh hon ca toc do toi da (cau
+      do se tran slot du da o toc do toi da)."""
+    try:
+        co_ban = float(toc_do_co_ban)
+    except (TypeError, ValueError):
+        co_ban = 1.0
+    try:
+        toi_da = float(toc_do_toi_da)
+    except (TypeError, ValueError):
+        toi_da = 1.35
+    toi_da = max(toi_da, co_ban)  # khong cham lai duoi toc do co ban
+    if not slot_ms or slot_ms <= 0 or not do_dai_ms or do_dai_ms <= 0:
+        return co_ban, 1.0, False
+    if do_dai_ms <= slot_ms:
+        return co_ban, 1.0, False
+    he_so = do_dai_ms / float(slot_ms)
+    toc_do_thuc = co_ban * he_so
+    if toc_do_thuc > toi_da:
+        return toi_da, toi_da / co_ban, True
+    return toc_do_thuc, he_so, False
+
+
+def _chuoi_atempo(he_so):
+    """Tach he so tang toc thanh chuoi filter atempo cua ffmpeg (moi
+    atempo chi nhan 0.5-2.0). vd: 1.6 -> 'atempo=1.6000';
+    3.2 -> 'atempo=2.0000,atempo=1.6000'."""
+    chuoi = []
+    con = float(he_so)
+    while con > 2.0:
+        chuoi.append("atempo=2.0000")
+        con /= 2.0
+    chuoi.append("atempo=%.4f" % con)
+    return ",".join(chuoi)
+
+
+def _tang_toc_mp3(duong_dan, he_so, ffmpeg):
+    """Tang toc file MP3 tai cho bang ffmpeg atempo (ghi qua file tam
+    roi chep de len file goc). Tra ve True neu xong, False neu loi
+    (khong co ffmpeg, he_so khong hop le, ffmpeg bao loi)."""
+    if not ffmpeg or not he_so or he_so <= 1.0:
+        return False
+    import tempfile
+    fd, tam = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)
+    try:
+        r = subprocess.run([ffmpeg, "-y", "-i", duong_dan, "-vn",
+                            "-af", _chuoi_atempo(he_so),
+                            "-b:a", "128k", tam],
+                           capture_output=True, timeout=120)
+        if (r.returncode != 0 or not os.path.isfile(tam)
+                or os.path.getsize(tam) == 0):
+            return False
+        shutil.copyfile(tam, duong_dan)
+        return True
+    except Exception:
+        return False
+    finally:
+        _xoa_file_quiet(tam)
+
+
+def _ap_dung_toc_do_tu_dong(duong_dan, cau, toc_do_co_ban, toc_do_toi_da,
+                            tu_dong, ffmpeg, log_cb=None):
+    """Ap dung toc do tu dong theo slot SRT cho 1 cau vua doc xong.
+    Tra ve toc_do_thuc_te (he so nhan) cua cau do.
+    - Tat tu_dong: tra ve toc_do_co_ban, khong lam gi (hanh vi cu v1.3).
+    - Do thoi luong that cua file (ffprobe/pydub); khong do duoc thi
+      uoc luong tu do dai van ban.
+    - Can nhanh hon thi dung ffmpeg atempo tang toc file tai cho.
+    - Khong kip du o toc do toi da (hoac khong tang toc duoc) thi ghi
+      log canh bao 'Câu X đọc hết Ys nhưng slot chỉ có Zs (tràn sang
+      câu sau)'."""
+    try:
+        co_ban = float(toc_do_co_ban)
+    except (TypeError, ValueError):
+        co_ban = 1.0
+    if not tu_dong:
+        return co_ban
+    slot_ms = cau["ket_thuc_ms"] - cau["bat_dau_ms"]
+    if slot_ms <= 0:
+        return co_ban
+    do_dai = _do_dai_mp3_ms(duong_dan, ffmpeg)
+    if do_dai is None:
+        do_dai = _uoc_luong_thoi_luong_ms(cau["text"], co_ban)
+        if log_cb and do_dai > 0:
+            log_cb("  (câu %d: không đo được thời lượng file, ước lượng "
+                   "%.1fs từ độ dài văn bản)" % (cau["chi_so"],
+                                                do_dai / 1000.0))
+    if do_dai <= 0:
+        return co_ban
+    toc_do_thuc, he_so, vuot_max = _tinh_toc_do_can(
+        slot_ms, do_dai, co_ban, toc_do_toi_da)
+    if he_so > 1.005:
+        if ffmpeg and _tang_toc_mp3(duong_dan, he_so, ffmpeg):
+            if log_cb:
+                log_cb("  Câu %d: đọc %.1fs, slot %.1fs -> tăng tốc lên "
+                       "%.2fx" % (cau["chi_so"], do_dai / 1000.0,
+                                  slot_ms / 1000.0, toc_do_thuc))
+        else:
+            if log_cb:
+                log_cb("  Câu %d: cần %.2fx mới kịp slot nhưng không tăng "
+                       "tốc được (thiếu ffmpeg) - giữ tốc độ %.2fx"
+                       % (cau["chi_so"], toc_do_thuc, co_ban))
+            toc_do_thuc = co_ban
+            he_so = 1.0
+    # Kiem tra tran slot sau khi tang toc (do lai thoi luong that neu
+    # vua tang toc; neu khong thi dung so da do/uoc luong).
+    do_dai_cuoi = do_dai
+    if he_so > 1.005:
+        do_dai_moi = _do_dai_mp3_ms(duong_dan, ffmpeg)
+        do_dai_cuoi = (do_dai_moi if do_dai_moi is not None
+                       else int(do_dai / he_so))
+    if do_dai_cuoi > slot_ms + DUNG_SAI_TRAN_SLOT_MS:
+        if log_cb:
+            log_cb("  Cảnh báo: Câu %d đọc hết %.1fs nhưng slot chỉ có "
+                   "%.1fs (tràn sang câu sau)"
+                   % (cau["chi_so"], do_dai_cuoi / 1000.0,
+                      slot_ms / 1000.0))
+    return toc_do_thuc
+
+
 def _phat_mp3(path, dung=None):
     """Phat 1 file MP3 ra loa NGAY trong tool (dung cho nut 'Nghe thu
     giong'). Windows: dung winmm (MCI) co san - phat khong cho roi
@@ -1203,7 +1402,9 @@ class GopDan:
                 .set_sample_width(self.sample_width))
         dai = len(am)
         cho_trong = cau["ket_thuc_ms"] - cau["bat_dau_ms"]
-        if dai > cho_trong:
+        # v1.4: dung sai 100ms (padding MP3) - tran it hon thi khong
+        # dem la tran slot.
+        if dai > cho_trong + DUNG_SAI_TRAN_SLOT_MS:
             self.tran_slot += 1
             if self.log_cb:
                 self.log_cb("  Canh bao: cau %d doc het %.1fs nhung slot "
@@ -1409,29 +1610,57 @@ class App(tk.Tk):
         self.lb_toc_do.grid(row=1, column=2, sticky="w")
         self.sl_toc_do.configure(command=self._doi_toc_do)
 
-        tk.Label(f2, text="Cao độ:").grid(row=2, column=0, sticky="w")
+        # v1.4 - Toc do tu dong theo tung cau (theo iContent): cau dai
+        # doc nhanh hon moi kip slot, cau ngan doc dung nhip. Bat thi
+        # moi cau tu tang toc toi da den "Toc do toi da" (mac dinh
+        # 1.35x); tat thi moi cau doc dung toc do co ban (hanh vi cu
+        # v1.3).
+        self.var_tu_dong_toc_do = tk.BooleanVar(
+            value=bool(self.cfg.get("tu_dong_toc_do", True)))
+        self.cb_tu_dong = tk.Checkbutton(
+            f2, text="Tự động chỉnh tốc độ từng câu",
+            variable=self.var_tu_dong_toc_do,
+            command=self._doi_tu_dong_toc_do)
+        self.cb_tu_dong.grid(row=2, column=1, sticky="w", padx=4)
+        tk.Label(f2, text="Tốc độ tối đa:").grid(row=3, column=0,
+                                                 sticky="w")
+        self.sl_toc_do_toi_da = tk.Scale(
+            f2, from_=1.0, to=2.0, resolution=0.01, orient="horizontal",
+            length=220)
+        self.sl_toc_do_toi_da.set(
+            max(1.0, min(2.0, float(self.cfg.get("toc_do_toi_da", 1.35)))))
+        self.sl_toc_do_toi_da.grid(row=3, column=1, sticky="w", padx=4)
+        self.lb_toc_do_toi_da = tk.Label(f2, text="1.35x")
+        self.lb_toc_do_toi_da.grid(row=3, column=2, sticky="w")
+        self.sl_toc_do_toi_da.configure(command=self._doi_toc_do_toi_da)
+        if not self.var_tu_dong_toc_do.get():
+            self.sl_toc_do_toi_da.configure(state="disabled")
+
+        tk.Label(f2, text="Cao độ:").grid(row=4, column=0, sticky="w")
         self.sl_cao_do = tk.Scale(f2, from_=-20, to=20, orient="horizontal",
                                   length=220)
         self.sl_cao_do.set(int(self.cfg.get("cao_do", 0)))
-        self.sl_cao_do.grid(row=2, column=1, sticky="w", padx=4)
+        self.sl_cao_do.grid(row=4, column=1, sticky="w", padx=4)
         self.lb_cao_do = tk.Label(f2, text="+0Hz")
-        self.lb_cao_do.grid(row=2, column=2, sticky="w")
+        self.lb_cao_do.grid(row=4, column=2, sticky="w")
         self.sl_cao_do.configure(command=self._doi_cao_do)
         # v1.3 - Nghe thu giong: go 1 doan van ngan vao o nay (de trong
         # thi nghe cau dang chon trong danh sach), bam nut PLAY la doc
         # va PHAT TIENG RA LOA NGAY trong tool (khong tao file MP3,
         # khong mo trinh phat ngoai). Nut Dung de dung giua chung.
-        tk.Label(f2, text="Nghe thử:").grid(row=3, column=0, sticky="w")
+        tk.Label(f2, text="Nghe thử:").grid(row=5, column=0, sticky="w")
         self.e_nghe_thu = tk.Entry(f2, width=30)
-        self.e_nghe_thu.grid(row=3, column=1, sticky="w", padx=4)
+        self.e_nghe_thu.grid(row=5, column=1, sticky="w", padx=4)
         self.btn_nghe_thu = tk.Button(f2, text="▶ Nghe thử",
                                       command=self.bam_nghe_thu)
-        self.btn_nghe_thu.grid(row=3, column=2, sticky="w", padx=2)
+        self.btn_nghe_thu.grid(row=5, column=2, sticky="w", padx=2)
         self.btn_dung_nghe = tk.Button(f2, text="Dừng",
                                        command=self._dung_nghe_thu,
                                        state="disabled")
-        self.btn_dung_nghe.grid(row=3, column=3, sticky="w", padx=2)
+        self.btn_dung_nghe.grid(row=5, column=3, sticky="w", padx=2)
         self.lb_toc_do.configure(text=_dinh_dang_toc_do(self.sl_toc_do.get()))
+        self.lb_toc_do_toi_da.configure(
+            text=_dinh_dang_toc_do(self.sl_toc_do_toi_da.get()))
         self.lb_cao_do.configure(text=_dinh_dang_cao_do(self.sl_cao_do.get()))
 
         f3 = tk.Frame(self)
@@ -1538,6 +1767,21 @@ class App(tk.Tk):
         self.lb_toc_do.configure(text=_dinh_dang_toc_do(float(v)))
         self._cap_nhat_nut_tiep_tuc()
 
+    def _doi_tu_dong_toc_do(self):
+        # v1.4: bat/tat tu dong toc do - thanh Toc do toi da chi co
+        # nghia khi bat (tat thi mo di). Doi cai dat thi tien trinh cu
+        # co the khong con hop le -> danh gia lai nut "Tiep tuc".
+        if self.var_tu_dong_toc_do.get():
+            self.sl_toc_do_toi_da.configure(state="normal")
+        else:
+            self.sl_toc_do_toi_da.configure(state="disabled")
+        self._cap_nhat_nut_tiep_tuc()
+
+    def _doi_toc_do_toi_da(self, v):
+        # v1.4: toc do toi da la he so nhan (1.35x) - hien thi '1.35x'.
+        self.lb_toc_do_toi_da.configure(text=_dinh_dang_toc_do(float(v)))
+        self._cap_nhat_nut_tiep_tuc()
+
     def _doi_cao_do(self, v):
         self.lb_cao_do.configure(text=_dinh_dang_cao_do(int(float(v))))
         self._cap_nhat_nut_tiep_tuc()
@@ -1627,8 +1871,19 @@ class App(tk.Tk):
                 # dung sai nho vi slider luu dang float.
                 toc_do_tt = float(tt.get("toc_do", 1.0))
                 toc_do_hien = float(self.sl_toc_do.get())
+                # v1.4: toc_do_toi_da + tu_dong_toc_do cung phai khop
+                # (doi cai dat toc do thi cac cau con lai doc khac di).
+                # Tien trinh v1.3 cu khong co 2 khoa nay -> mac dinh
+                # (1.35x, True) nen van hop le neu giao dien dang de
+                # mac dinh.
+                toi_da_tt = float(tt.get("toc_do_toi_da", 1.35))
+                toi_da_hien = float(self.sl_toc_do_toi_da.get())
+                tu_dong_tt = bool(tt.get("tu_dong_toc_do", True))
                 if (tt.get("giong") != self.cb_giong.get()
                         or abs(toc_do_tt - toc_do_hien) > 0.001
+                        or abs(toi_da_tt - toi_da_hien) > 0.001
+                        or tu_dong_tt != bool(
+                            self.var_tu_dong_toc_do.get())
                         or int(tt.get("cao_do", 0)) != int(self.sl_cao_do.get())
                         or tt.get("che_do") != self.che_do.get()):
                     continue
@@ -1657,6 +1912,16 @@ class App(tk.Tk):
             tt["cau_da_xong"] = sorted(set(xong))
             tt["thu_muc_rieng"] = thu_muc_rieng
             tt["thu_muc"] = tt.get("thu_muc", thu_muc)
+            # v1.4: toc do thuc tung cau da xong (de hien lai trang thai
+            # "Xong (1.60x)" khi noi lai file cu; khoa JSON la chuoi nen
+            # doi lai sang so nguyen).
+            toc_do_cau = {}
+            try:
+                for k, v in (tt.get("toc_do_cau") or {}).items():
+                    toc_do_cau[int(k)] = float(v)
+            except (TypeError, ValueError):
+                toc_do_cau = {}
+            tt["toc_do_cau"] = toc_do_cau
             if tot_nhat is None or len(xong) > len(
                     tot_nhat["cau_da_xong"]):
                 tot_nhat = tt
@@ -1799,6 +2064,9 @@ class App(tk.Tk):
             "giong": self.cb_giong.get(),
             # v1.3: toc_do luu dang he so nhan (1.35x).
             "toc_do": float(self.sl_toc_do.get()),
+            # v1.4: toc do toi da + bat/tat tu dong toc do tung cau.
+            "toc_do_toi_da": float(self.sl_toc_do_toi_da.get()),
+            "tu_dong_toc_do": bool(self.var_tu_dong_toc_do.get()),
             "cao_do": int(self.sl_cao_do.get()),
             "thu_muc_luu": self.e_luu.get().strip(),
             "che_do": self.che_do.get(),
@@ -2115,10 +2383,20 @@ class App(tk.Tk):
         self.cb_giong.set(tt["giong"])
         # v1.3: toc_do luu dang he so nhan (1.35x).
         self.sl_toc_do.set(float(tt["toc_do"]))
+        # v1.4: toc_do_toi_da + tu_dong_toc_do (mac dinh v1.3 cu).
+        self.sl_toc_do_toi_da.set(
+            max(1.0, min(2.0, float(tt.get("toc_do_toi_da", 1.35)))))
+        self.var_tu_dong_toc_do.set(bool(tt.get("tu_dong_toc_do", True)))
+        if self.var_tu_dong_toc_do.get():
+            self.sl_toc_do_toi_da.configure(state="normal")
+        else:
+            self.sl_toc_do_toi_da.configure(state="disabled")
         self.sl_cao_do.set(int(tt["cao_do"]))
         self.che_do.set(tt["che_do"])
         self.lb_toc_do.configure(
             text=_dinh_dang_toc_do(float(tt["toc_do"])))
+        self.lb_toc_do_toi_da.configure(
+            text=_dinh_dang_toc_do(float(tt.get("toc_do_toi_da", 1.35))))
         self.lb_cao_do.configure(
             text=_dinh_dang_cao_do(int(tt["cao_do"])))
         self.thu_muc_xuat = tt["thu_muc"]
@@ -2127,6 +2405,7 @@ class App(tk.Tk):
                   % (len(tt["cau_da_xong"]), tt["tong_cau"]))
         self._bat_dau_chung(srt, ffmpeg, thu_muc_ghi_de=tt["thu_muc"],
                             cau_da_xong_truoc=set(tt["cau_da_xong"]),
+                            toc_do_cau_truoc=tt.get("toc_do_cau") or {},
                             la_tiep_tuc=True)
 
     def _bat_dau_sub_lai(self):
@@ -2163,7 +2442,8 @@ class App(tk.Tk):
         self._bat_dau_chung(srt, ffmpeg, thu_muc_ghi_de=thu_muc_moi)
 
     def _bat_dau_chung(self, srt, ffmpeg, thu_muc_ghi_de=None,
-                       cau_da_xong_truoc=None, la_tiep_tuc=False):
+                       cau_da_xong_truoc=None, la_tiep_tuc=False,
+                       toc_do_cau_truoc=None):
         """Chuan bi chung truoc khi chay worker xuat (lay het gia tri
         giao dien o luong chinh, khoa nut, mo worker)."""
         self._luu_cai_dat_hien_tai()
@@ -2174,6 +2454,9 @@ class App(tk.Tk):
             "giong_hien_thi": self.cb_giong.get(),
             # v1.3: toc_do la he so nhan (1.35x).
             "toc_do": float(self.sl_toc_do.get()),
+            # v1.4: toc do toi da + bat/tat tu dong toc do tung cau.
+            "toc_do_toi_da": float(self.sl_toc_do_toi_da.get()),
+            "tu_dong_toc_do": bool(self.var_tu_dong_toc_do.get()),
             "cao_do": int(self.sl_cao_do.get()),
             "che_do": self.che_do.get(),
             "thu_muc_goc": self.e_luu.get().strip() or mac_dinh_thu_muc_luu(),
@@ -2188,11 +2471,13 @@ class App(tk.Tk):
         self.hang_doi.put(("ket_qua", ""))
         threading.Thread(target=self._chay,
                          args=(srt, ffmpeg, ts, thu_muc_ghi_de,
-                               cau_da_xong_truoc, la_tiep_tuc),
+                               cau_da_xong_truoc, la_tiep_tuc,
+                               toc_do_cau_truoc),
                          daemon=True).start()
 
     def _chay(self, srt, ffmpeg, ts, thu_muc_ghi_de=None,
-              cau_da_xong_truoc=None, la_tiep_tuc=False):
+              cau_da_xong_truoc=None, la_tiep_tuc=False,
+              toc_do_cau_truoc=None):
         from pydub import AudioSegment
         if ffmpeg:
             AudioSegment.converter = ffmpeg
@@ -2201,6 +2486,9 @@ class App(tk.Tk):
         cao_do = ts["cao_do"]
         che_do = ts["che_do"]
         thu_muc_goc = ts["thu_muc_goc"]
+        # v1.4: toc do toi da + bat/tat tu dong toc do tung cau.
+        toc_do_toi_da = ts.get("toc_do_toi_da", 1.35)
+        tu_dong_toc_do = ts.get("tu_dong_toc_do", True)
         ten_goc = os.path.splitext(os.path.basename(srt))[0]
         # v1.3: thu muc xuat co the duoc chi dinh truoc (Tiep tuc: dung
         # lai thu muc cu; Xuat moi/Sub lai: thu muc moi (1), (2)...).
@@ -2232,6 +2520,19 @@ class App(tk.Tk):
         self._log("Đọc %d câu bằng giọng %s (%s), tốc độ %s, cao độ %s"
                   % (tong, ts["giong_hien_thi"], voice,
                      _dinh_dang_toc_do(toc_do), _dinh_dang_cao_do(cao_do)))
+        # v1.4: bao ro che do toc do tu dong dang dung (de anh biet cau
+        # dai se tu tang toc toi da bao nhieu).
+        if tu_dong_toc_do:
+            if not ffmpeg:
+                self._log("Tự động chỉnh tốc độ từng câu đang BẬT nhưng "
+                          "không tìm thấy ffmpeg (cần ffmpeg để đo thời "
+                          "lượng và tăng tốc) - các câu sẽ đọc ở tốc độ "
+                          "cơ bản %s." % _dinh_dang_toc_do(toc_do))
+            else:
+                self._log("Tự động chỉnh tốc độ từng câu: câu dài tự "
+                          "tăng tốc tối đa %s (đo thời lượng thật rồi "
+                          "dùng ffmpeg atempo, không gọi lại API giọng)."
+                          % _dinh_dang_toc_do(toc_do_toi_da))
         self._log("Thư mục lưu: %s" % thu_muc)
         for cau in cac_cau:
             self._dat_trang_thai_cau(cau["chi_so"], "Chờ")
@@ -2239,6 +2540,9 @@ class App(tk.Tk):
         can_gop = che_do in ("gop", "ca_hai")
         so_cau_xong = 0  # dem that, dung ca khi huy giua chung
         cau_da_xong = set()  # chi_so cac cau da doc xong
+        # v1.4: toc do thuc tung cau da xong (de luu vao tien trinh va
+        # hien lai trang thai "Xong (1.60x)" khi Tiep tuc).
+        toc_do_cau = dict(toc_do_cau_truoc or {})
         da_huy = False
         cau_dung = 0  # chi so cau dang doc luc bam Huy
         # v1.3 - GHEP DAN: moi cau doc xong la ghep ngay vao file long
@@ -2276,7 +2580,14 @@ class App(tk.Tk):
                         continue
                     cau_da_xong.add(cau["chi_so"])
                     so_cau_xong += 1
-                    self._dat_trang_thai_cau(cau["chi_so"], "Xong")
+                    # v1.4: hien lai toc do thuc cua cau da xong (neu co
+                    # luu trong tien trinh).
+                    toc_do_cu = toc_do_cau.get(cau["chi_so"])
+                    if tu_dong_toc_do and toc_do_cu is not None:
+                        self._dat_trang_thai_cau(
+                            cau["chi_so"], "Xong (%.2fx)" % toc_do_cu)
+                    else:
+                        self._dat_trang_thai_cau(cau["chi_so"], "Xong")
             if cau_hong:
                 self._log("Có %d câu đã xong nhưng file bị hỏng, sẽ đọc "
                           "lại: %s" % (len(cau_hong), sorted(cau_hong)))
@@ -2302,9 +2613,21 @@ class App(tk.Tk):
                 self._dat_trang_thai_cau(cau["chi_so"], "Lỗi: " + (loi or "?")[:60])
                 self._log("  -> LỖI câu %d: %s" % (cau["chi_so"], loi))
                 return False
+            # v1.4: toc do tu dong theo slot SRT - do thoi luong that
+            # cua file vua tao roi dung ffmpeg atempo tang toc neu can
+            # (khong goi lai API giong). Trang thai hien toc do thuc
+            # cua cau (vd "Xong (1.60x)").
+            toc_do_thuc = _ap_dung_toc_do_tu_dong(
+                dich, cau, toc_do, toc_do_toi_da, tu_dong_toc_do, ffmpeg,
+                log_cb=self._log)
+            toc_do_cau[cau["chi_so"]] = toc_do_thuc
             so_cau_xong += 1
             cau_da_xong.add(cau["chi_so"])
-            self._dat_trang_thai_cau(cau["chi_so"], "Xong")
+            if tu_dong_toc_do:
+                self._dat_trang_thai_cau(cau["chi_so"],
+                                         "Xong (%.2fx)" % toc_do_thuc)
+            else:
+                self._dat_trang_thai_cau(cau["chi_so"], "Xong")
             if bo_xac_minh:
                 self._log("  -> Xong (đã dùng chế độ bỏ xác minh SSL)")
             # v1.3: ghep ngay cau vua xong vao file long tieng.
@@ -2400,6 +2723,12 @@ class App(tk.Tk):
                     "che_do": che_do,
                     "giong": ts["giong_hien_thi"],
                     "toc_do": float(toc_do),
+                    # v1.4: toc do toi da + bat/tat tu dong + toc do thuc
+                    # tung cau da xong (de Tiep tuc noi dung toc do).
+                    "toc_do_toi_da": float(toc_do_toi_da),
+                    "tu_dong_toc_do": bool(tu_dong_toc_do),
+                    "toc_do_cau": {str(k): float(v)
+                                   for k, v in toc_do_cau.items()},
                     "cao_do": int(cao_do),
                     "thu_muc": thu_muc,
                     "thu_muc_rieng": thu_muc_rieng,
