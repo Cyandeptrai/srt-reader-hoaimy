@@ -36,7 +36,10 @@ File nguồn: `SRT-Reader-HoaiMy.py`. Chạy trực tiếp file
 4. Chọn đầu ra (mặc định là **Gộp 1 file lồng tiếng**):
    - **Gộp 1 file lồng tiếng (MP3)**: 1 file duy nhất, mỗi câu nằm đúng mốc
      thời gian trong SRT (khoảng trống giữa các câu là im lặng) — dùng làm
-     track lồng tiếng, ghép vào video là khớp.
+     track lồng tiếng, ghép vào video là khớp. File MP3 đầu ra là định
+     dạng chuẩn **44.1kHz, stereo, 192kbps** (libmp3lame) để tương thích
+     rộng với các phần mềm dựng video (từ v1.5; các bản trước ra 24kHz
+     mono nên phần mềm Concat không đọc được).
    - **Từng câu riêng (MP3)**: mỗi câu phụ đề thành 1 file `001.mp3`, `002.mp3`...
    - **Cả hai**: làm cả 2 loại trên.
 5. Bấm nút **XUẤT MP3 LỒNG TIẾNG** (nút chính). Tiến độ hiện theo từng câu

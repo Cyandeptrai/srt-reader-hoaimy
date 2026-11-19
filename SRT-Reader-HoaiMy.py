@@ -29,7 +29,18 @@ import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "SRT Reader HoaiMy"
-VERSION = "1.4"
+VERSION = "1.5"
+# Dinh dang MP3 dau ra CHUAN (v1.5): 44.1kHz stereo 192k libmp3lame.
+# Ly do: MP3 goc cua edge-tts la 24kHz mono; file gop cuoi cua v1.3/v1.4
+# giu nguyen 24kHz mono nen mot so phan mem dung video (vd Concat)
+# khong xu ly duoc (ffmpeg cua Concat bao "filter output failed:
+# Invalid argument"). Chuan hoa moi MP3 tool tu tao ra ve 44.1kHz
+# stereo 192k - dinh dang MP3 pho bien nhat, tuong thich rong.
+# (File cau rieng la file goc cua edge-tts, khong qua buoc ma hoa lai,
+# van giu 24kHz mono nhu cu - da chay tot o v1.3.)
+MP3_CHUAN_TAN_SO = 44100
+MP3_CHUAN_KENH = 2
+MP3_CHUAN_BITRATE = "192k"
 # Ten file exe that su (khac APP_TITLE: exe dung gach noi, khong dung khoang trang).
 EXE_TEN = "SRT-Reader-HoaiMy.exe"
 GITHUB_REPO = "Cyandeptrai/srt-reader-hoaimy"
@@ -833,7 +844,11 @@ def doc_thanh_mp3(text, voice, toc_do, cao_do, duong_dan_ra, log_cb=None):
                 os.remove(tam_path)
             except OSError:
                 pass
-    am_thanh.export(duong_dan_ra, format="mp3")
+    # v1.5: chuan hoa MP3 dau ra ve 44.1kHz stereo 192k (xem MP3_CHUAN_*).
+    (am_thanh.set_frame_rate(MP3_CHUAN_TAN_SO)
+              .set_channels(MP3_CHUAN_KENH)
+              .export(duong_dan_ra, format="mp3",
+                      bitrate=MP3_CHUAN_BITRATE))
     return True, False, ""
 
 
@@ -996,8 +1011,11 @@ def _doc_giong_may_1_doan(text, toc_do, cao_do, duong_dan_ra, log_cb,
         if log_cb and ten_giong:
             log_cb("  Giọng máy đang dùng: %s" % ten_giong)
         try:
+            # v1.5: chuan hoa MP3 dau ra ve 44.1kHz stereo 192k.
             r = subprocess.run([ffmpeg, "-y", "-i", wav_path,
-                                duong_dan_ra],
+                                "-ar", str(MP3_CHUAN_TAN_SO),
+                                "-ac", str(MP3_CHUAN_KENH),
+                                "-b:a", MP3_CHUAN_BITRATE, duong_dan_ra],
                                capture_output=True, timeout=120)
         except Exception as e:
             return False, False, "lỗi chạy ffmpeg: %s" % e
@@ -1040,7 +1058,11 @@ def doc_giong_may(text, toc_do, cao_do, duong_dan_ra, log_cb=None,
                 return False, False, "doan %d loi: %s" % (j + 1, loi)
         finally:
             _xoa_file_quiet(tam_path)
-    am_thanh.export(duong_dan_ra, format="mp3")
+    # v1.5: chuan hoa MP3 dau ra ve 44.1kHz stereo 192k (xem MP3_CHUAN_*).
+    (am_thanh.set_frame_rate(MP3_CHUAN_TAN_SO)
+              .set_channels(MP3_CHUAN_KENH)
+              .export(duong_dan_ra, format="mp3",
+                      bitrate=MP3_CHUAN_BITRATE))
     return True, False, ""
 
 
@@ -1174,9 +1196,14 @@ def _tang_toc_mp3(duong_dan, he_so, ffmpeg):
     fd, tam = tempfile.mkstemp(suffix=".mp3")
     os.close(fd)
     try:
+        # v1.5: chuan hoa MP3 sau atempo ve 44.1kHz stereo 192k (xem
+        # MP3_CHUAN_*) de file cau tang toc co dung dinh dang chuan
+        # truoc khi gop (khong giu 24kHz mono cua file goc).
         r = subprocess.run([ffmpeg, "-y", "-i", duong_dan, "-vn",
                             "-af", _chuoi_atempo(he_so),
-                            "-b:a", "128k", tam],
+                            "-ar", str(MP3_CHUAN_TAN_SO),
+                            "-ac", str(MP3_CHUAN_KENH),
+                            "-b:a", MP3_CHUAN_BITRATE, tam],
                            capture_output=True, timeout=120)
         if (r.returncode != 0 or not os.path.isfile(tam)
                 or os.path.getsize(tam) == 0):
@@ -1448,8 +1475,15 @@ class GopDan:
                     self._ghi_header_vao(f, can_bytes)
         tong_ms = self.do_dai_ms()
         try:
+            # v1.5: ep MP3 dich ve dinh dang chuan 44.1kHz stereo 192k
+            # (xem MP3_CHUAN_*) - khong giu 24kHz mono cua WAV tam
+            # (WAV tam lay tan so/kênh tu cau dau tien, thuong la
+            # 24kHz mono cua edge-tts) de file long tieng tuong thich
+            # rong voi cac phan mem dung video (vd Concat).
             r = subprocess.run([ffmpeg, "-y", "-i", self.wav,
-                                "-b:a", "128k", self.mp3],
+                                "-ar", str(MP3_CHUAN_TAN_SO),
+                                "-ac", str(MP3_CHUAN_KENH),
+                                "-b:a", MP3_CHUAN_BITRATE, self.mp3],
                                capture_output=True, timeout=600)
         except Exception:
             return False, 0
